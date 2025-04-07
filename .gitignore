@@ -79,6 +79,5 @@ dmypy.json
 
 # Log files & Data artifacts
 d3rlpy_logs/
-data/*.h5
 data/*.pkl
 analysis_plots/ 
