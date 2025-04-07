@@ -131,7 +131,7 @@ def main():
         # Add other configured hyperparameters here
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    cql = cql_config.create(device= device)
+    cql = cql_config.create(device= device.type)
 
     # --- Setup Evaluators (Optional but Recommended) ---
     # These run periodically during training to provide insights
