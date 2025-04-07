@@ -68,13 +68,13 @@ def parse_args():
         args.logdir = os.path.join(DEFAULT_LOGDIR_BASE, args.experiment_name)
         
     # Determine device
-    args.device = "cuda:0"
-    # if args.gpu is not None and torch.cuda.is_available():
-    #     args.device = f"cuda:{args.gpu}"
-    # else:
-    #     args.device = "cpu"
-    #     if args.gpu is not None:
-    #          print(f"Warning: GPU {args.gpu} requested but CUDA not available. Using CPU.")
+    # args.device = "cuda:0"
+    if args.gpu is not None and torch.cuda.is_available():
+        args.device = f"cuda:{args.gpu}"
+    else:
+        args.device = "cpu"
+        if args.gpu is not None:
+             print(f"Warning: GPU {args.gpu} requested but CUDA not available. Using CPU.")
     
     return args
 
