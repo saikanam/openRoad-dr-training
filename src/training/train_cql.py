@@ -67,14 +67,6 @@ def parse_args():
     if args.logdir is None:
         args.logdir = os.path.join(DEFAULT_LOGDIR_BASE, args.experiment_name)
         
-    # Determine device
-    # args.device = "cuda:0"
-    if args.gpu is not None and torch.cuda.is_available():
-        args.device = f"cuda:{args.gpu}"
-    else:
-        args.device = "cpu"
-        if args.gpu is not None:
-             print(f"Warning: GPU {args.gpu} requested but CUDA not available. Using CPU.")
     
     return args
 
@@ -87,7 +79,7 @@ def main():
     print(f"Log Directory: {args.logdir}")
     print(f"Epochs: {args.epochs}")
     print(f"Seed: {args.seed}")
-    print(f"Device: {args.device}")
+    print(f"Device: {torch.device("cuda" if torch.cuda.is_available() else "cpu")}")
     print(f"Hyperparameters: ActorLR={args.actor_lr}, CriticLR={args.critic_lr}, ConservWeight={args.conservative_weight}, Batch={args.batch_size}")
     print(f"Gradient Clipping Norm: {args.grad_clip}")
     print(f"Initial Temperature: {args.initial_temperature}, Temp LR: {args.temp_learning_rate}")
@@ -138,7 +130,8 @@ def main():
         reward_scaler=reward_scaler # Add reward scaler to config
         # Add other configured hyperparameters here
     )
-    cql = cql_config.create(device=args.device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cql = cql_config.create(device= device)
 
     # --- Setup Evaluators (Optional but Recommended) ---
     # These run periodically during training to provide insights
