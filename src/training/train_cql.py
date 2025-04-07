@@ -79,7 +79,7 @@ def main():
     print(f"Log Directory: {args.logdir}")
     print(f"Epochs: {args.epochs}")
     print(f"Seed: {args.seed}")
-    print(f"Device: {torch.device("cuda" if torch.cuda.is_available() else "cpu")}")
+    print(f"Device: {torch.device('cuda' if torch.cuda.is_available() else 'cpu')}")
     print(f"Hyperparameters: ActorLR={args.actor_lr}, CriticLR={args.critic_lr}, ConservWeight={args.conservative_weight}, Batch={args.batch_size}")
     print(f"Gradient Clipping Norm: {args.grad_clip}")
     print(f"Initial Temperature: {args.initial_temperature}, Temp LR: {args.temp_learning_rate}")
