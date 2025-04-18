@@ -30,7 +30,6 @@ Implement an offline reinforcement learning agent (using CQL and d3rlpy) based o
         *   `wireLength` (verify consistency)
         *   Weights (`drc_weight`, etc. - verify consistency)
         *   `pin_count`, `net_count` (verify consistency)
-        *   `total_box_drv = sum(box_drv)`
         *   `average_box_drv = mean(box_drv)`
         *   `max_box_drv = max(box_drv)`
         *   `num_violating = count(box_drv > 0)`
@@ -68,6 +67,8 @@ Implement an offline reinforcement learning agent (using CQL and d3rlpy) based o
     *   Include historical DRV values `drv_{t-1}` to `drv_{t-k}`.
     *   **If any historical `drv_lag_k` value is NaN (due to being near the start of a trajectory), replace it with -1.**
     *   Construct the next state vector `s_{t+1}` using features from iteration `t`, applying the same padding logic for its historical components.
+    *   **Note:** `total_box_drv` feature removed from state.
+    *   **Note:** `average_box_drv` added to state.
 
 9.  **[TODO] State Normalization:**
     *   Collect all state vectors (`s_t`).
@@ -82,6 +83,7 @@ Implement an offline reinforcement learning agent (using CQL and d3rlpy) based o
 11. **[TODO] Assemble & Save Dataset:**
     *   Gather the final lists/arrays of normalized states, actions, combined (and imputed) rewards, and terminals.
     *   **No filtering based on NaN rewards needed as they have been imputed.**
+    *   Calculate and save action min/max statistics (`action_min_max.npz`).
     *   Create the `d3rlpy.dataset.MDPDataset` object.
     *   Save the dataset object.
 
@@ -93,63 +95,93 @@ Implement an offline reinforcement learning agent (using CQL and d3rlpy) based o
 
 **Detailed Steps:**
 
-1.  **[TODO] Basic Training Script (`train_cql.py`):**
+1.  **[TODO] Basic CQL Training Script (`train_cql.py`):**
     *   Load the saved `MDPDataset`.
-    *   Initialize a `d3rlpy.algos.CQL` agent. Use `CQLConfig()` and pass hyperparameters (`actor_learning_rate`, `critic_learning_rate`, `conservative_weight`, `batch_size`).
+    *   Load action min/max statistics from `action_min_max.npz`.
+    *   Initialize `d3rlpy.preprocessing.MinMaxActionScaler` with loaded statistics.
+    *   Initialize a `d3rlpy.algos.CQLConfig` passing the `MinMaxActionScaler` to `action_scaler`. Optionally configure `reward_scaler`.
+    *   Create the `CQL` agent: `cql = config.create(...)`.
     *   Set the random seed globally using `d3rlpy.seed(seed_value)`.
     *   Run `cql.fit()` passing the loaded `ReplayBuffer` object and necessary arguments (`n_steps`, `experiment_name`, `evaluators`, etc.). Remove `logdir` argument from `fit` call.
     *   Monitor output for errors, Q-value progression, loss curves.
-    *   Save the trained model checkpoint.
+    *   Save the trained model parameters checkpoint using `cql.save_model()`.
+    *   Export the inference policy using `cql.save_policy()` to TorchScript (`policy.pt`) and ONNX (`policy.onnx`).
+2.  **[TODO] Basic Decision Transformer Training Script (`train_dt.py`):**
+    *   **Copy and adapt `train_cql.py`.**
+    *   Load the saved `MDPDataset` (same as CQL).
+    *   Load action min/max statistics and initialize `MinMaxActionScaler`.
+    *   Import `DecisionTransformerConfig`, `DecisionTransformer`, `GPTAdamWFactory`.
+    *   **Determine `max_timestep`:** Analyze the processed data (before `MDPDataset` creation, e.g., the aggregated iteration DataFrame) to find the maximum `iteration` value within any `uniqueID`. Add this calculation to `create_dataset.py` or analyze offline.
+    *   Initialize a `d3rlpy.algos.DecisionTransformerConfig`, passing necessary arguments:
+        *   `context_size` (e.g., 20)
+        *   `max_timestep` (determined above)
+        *   `action_scaler`
+        *   `reward_scaler` (optional)
+        *   `optim_factory=GPTAdamWFactory()`
+        *   Learning rate, warmup tokens, transformer architecture parameters (start with defaults).
+    *   Create the `DT` agent: `dt = config.create(...)`.
+    *   Run `dt.fit()` using the same dataset and similar arguments as CQL (`n_steps`, `experiment_name`, etc.). Use DT-specific evaluators if available, or common ones like `InitialStateValueEstimationEvaluator`.
+    *   Monitor output.
+    *   Save the trained model (`dt.save_model()`).
+    *   Export the inference policy (`dt.save_policy()` for TorchScript/ONNX).
 
 ## 4. Phase 3: Hyperparameter Tuning & Experimentation
 
 **Priority:** Medium-High (Iterative process after initial training).
 
-**Objective:** Find optimal hyperparameters for the CQL agent and reward function.
+**Objective:** Find optimal hyperparameters for the CQL and DT agents and reward function.
 
 **Detailed Steps:**
 
 1.  **[TODO] Experimentation Framework:**
     *   Choose and set up an experiment tracking tool (MLflow, W&B, or custom logging).
-    *   Refine `train_cql.py` to accept hyperparameters as arguments.
+    *   Refine `train_cql.py` and `train_dt.py` to accept hyperparameters as arguments.
     *   Define ranges and strategies for tuning:
-        *   CQL `conservative_weight` (key parameter, replaces `alpha` in config)
-        *   Learning rates (actor, critic, temperature, alpha_lr - for internal alpha tuning)
-        *   Reward weights (β₁, β₂, β₃, β₄)
-        *   Stuck penalty parameters (`penalty_value`, `ε_stuck`, `m`)
-        *   Convergence bonus value
-        *   Normalization methods (state, reward)
-        *   Network architectures
-2.  **[TODO] Run Tuning Experiments:** Execute training runs with different hyperparameter combinations.
-    *   **Update:** Initial runs using `conservative_weight=1.0` (previously found best on filtered data) with default LRs (actor=3e-5, critic=3e-4) on the complete, correctly processed dataset resulted in training instability (exploding losses). **Priority should be given to tuning `conservative_weight` and significantly reducing learning rates.**
+        *   **CQL:** `conservative_weight`, learning rates (actor, critic, temperature, alpha_lr).
+        *   **DT:** `context_size`, `max_timestep` (if analysis suggests variability), learning rate, learning schedule (`warmup_tokens`, `final_tokens`), transformer architecture (`num_heads`, `num_layers`).
+        *   **Common:** Reward weights (β₂, β₃, β₄), Stuck penalty parameters (`penalty_value`, `ε_stuck`, `m`), Convergence bonus value, Normalization methods, Action normalization.
+2.  **[TODO] Run Tuning Experiments:** Execute training runs with different hyperparameter combinations for both CQL and DT.
+    *   **Update (CQL):** Initial runs using `conservative_weight=1.0` (previously found best on filtered data) with default LRs (actor=3e-5, critic=3e-4) on the complete, correctly processed dataset resulted in training instability (exploding losses). **Priority should be given to tuning `conservative_weight` and significantly reducing learning rates for CQL.**
+    *   **DT:** Start with default DT hyperparameters and tune `context_size`, learning rate schedule first.
 
 ## 5. Phase 4: Evaluation
 
 **Priority:** Medium-High (Parallel with tuning).
 
-**Objective:** Assess the performance of trained models.
+**Objective:** Assess the performance of trained models (CQL and DT).
 
 **Detailed Steps:**
 
 1.  **[TODO] Evaluation Script (`evaluate_agent.py`):**
-    *   Load a trained model checkpoint (`model.load_model()`, potentially preceded by `CQL.from_json()` to load config) and the state scaler (`joblib.load`).
-    *   Load the dataset using `ReplayBuffer.load(f, buffer=InfiniteBuffer())`.
-    *   Implement logic to simulate routing iterations *using the agent's predicted weights*. This requires a way to get the *outcome* (next state DRVs) based on the chosen weights - this might require interfacing with the original routing simulation environment or using a learned dynamics model if the original simulator isn't available/fast enough. **(This is a potentially complex dependency)**.
-    *   Alternatively, use offline evaluation metrics provided by d3rlpy if direct simulation is not feasible initially. **Note:** Instantiate evaluator classes (e.g., `TDErrorEvaluator`, `InitialStateValueEstimationEvaluator`) and *call the instances directly* with the algorithm and dataset: `metric = evaluator(algo=cql, dataset=replay_buffer)`.
-    *   Define metrics: Average iterations to convergence, final DRV, comparison to baseline fixed weights.
-2.  **[TODO] Run Evaluations:** Evaluate promising models from the tuning phase.
+    *   Load a trained model checkpoint (CQL or DT) and the state scaler.
+    *   **Adapt for DT:** DT evaluation ideally requires simulating interaction or using specialized offline metrics.
+    *   **Offline Metrics:** Use d3rlpy metrics. `InitialStateValueEstimationEvaluator` should work for both. `TDErrorEvaluator` is less meaningful for DT. Need to investigate DT-specific offline evaluation metrics if available in d3rlpy or literature.
+    *   **Simulation (If feasible):** The simulation logic needs to be adapted for DT. It must:
+        *   Maintain a history of states, actions, and target returns up to `context_size`.
+        *   Set a `target_return_to_go` for the DT policy at each step (this is a key design choice - e.g., use the dataset's average return, max return, or a desired target).
+        *   Feed the sequences and target RTG to the loaded DT policy.
+    *   Define metrics: Average iterations to convergence, final DRV, comparison to baseline and CQL.
+2.  **[TODO] Run Evaluations:** Evaluate promising models from the tuning phase for both CQL and DT.
 
-## 6. Phase 5: Inference System (Lower Priority)
+## 6. Phase 5: Inference System
 
-**Objective:** Integrate the trained model into the actual routing tool.
+**Priority:** Lower (Focus on training/evaluation first).
+
+**Objective:** Integrate the trained model (chosen best between CQL/DT) into the actual routing tool.
 
 **Detailed Steps:**
 
-1.  **[TODO] Inference Code:** Develop code to:
-    *   Load the saved model and state scaler.
-    *   Construct the state vector at each routing iteration based on simulator output.
-    *   Normalize the state.
-    *   Call `model.predict()` to get weights.
+1.  **[TODO] Inference Code (`predict_weights.py`):**
+    *   **Adapt for chosen model (CQL or DT).**
+    *   Load the chosen saved model/policy and state scaler.
+    *   **If DT:**
+        *   Implement logic to manage the sequence history (observations, actions, returns-to-go, timesteps) up to `context_size`.
+        *   Determine how to set the `target_return_to_go` for the policy (critical tuning parameter for performance).
+        *   Feed the properly formatted sequence inputs to the loaded DT policy.
+    *   **If CQL:** Load model, normalize state, predict.
+    *   Normalize the state using the state scaler.
+    *   Call the appropriate prediction function (`model.predict()` or policy call).
+    *   Apply final domain constraints to the weights.
     *   Feed weights back to the simulator.
 
 ## 7. Code Structure Suggestion
@@ -179,11 +211,13 @@ routing_rl/
 
 ## 8. Key Considerations & Risks
 
-*   **Reward Sparsity:** Primary challenge. Relying on `num_violating_reward` and careful tuning is key.
+*   **Reward Sparsity:** Primary challenge. Relying on `num_violating_reward` and careful tuning is key. Affects both CQL and DT.
 *   **Dataset Size:** ~6000 transitions might be insufficient for robust learning without denser rewards or more data.
-*   **Action Bias:** The learned policy for `decay_weight` will be constrained by the biased data.
-*   **Evaluation Complexity:** Evaluating the true impact requires either running the routing simulation or relying on potentially less accurate offline metrics.
-*   **Hyperparameter Sensitivity:** Offline RL, especially CQL, can be sensitive to hyperparameters (`conservative_weight`, learning rates, reward scaling).
+*   **Action Bias:** The learned policy for `decay_weight` will be constrained by the biased data (affects both).
+*   **Action Scaling:** Ensure `MinMaxActionScaler` is correctly configured. Ensure final constraints are applied during inference.
+*   **Evaluation Complexity:** Evaluating the true impact requires either running the routing simulation or relying on potentially less accurate offline metrics. DT evaluation can be more complex due to target return setting.
+*   **Hyperparameter Sensitivity:** Offline RL, especially CQL (`conservative_weight`, LRs) and DT (`context_size`, LR schedule, target), can be sensitive to hyperparameters.
+*   **DT Specifics:** Determining `max_timestep`, tuning `context_size`, and setting target returns for DT require careful consideration.
 
 ## 9. [TODO] Colab/Notebook Workflow (`main_workflow.ipynb`)
 
@@ -199,10 +233,10 @@ routing_rl/
 2.  **Data Preparation:**
     *   Execute the `src/data_processing/create_dataset.py` script (using `!python ...` or `%run ...`) or integrate its core logic directly into notebook cells.
     *   Verify the output dataset file (`data/routing_dataset.h5`) is created.
-3.  **Model Training:**
-    *   Execute the `src/training/train_cql.py` script (using `!python ...` or `%run ...`) or integrate its core logic into notebook cells.
+3.  **Model Training (Option to choose CQL or DT):**
+    *   Add logic or separate cells to run either `src/training/train_cql.py` or `src/training/train_dt.py`.
     *   Load the dataset created in the previous step.
-    *   Train the CQL agent.
+    *   Train the chosen agent.
     *   Save the trained model.
 4.  **Basic Results/Visualization:**
     *   Optionally load training logs/metrics and display basic plots (e.g., loss curves) if generated by the training script.

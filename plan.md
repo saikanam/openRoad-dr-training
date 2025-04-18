@@ -50,15 +50,14 @@ The state representation at the beginning of iteration `t` should include:
 - Performance metrics from the *end* of iteration `t-1`:
     - Iteration-level DRV count (`drv_{t-1}`)
     - Box-level DRV metrics:
-        - Total `box_drv` across all boxes (`total_box_drv_{t-1}`)
-        - Difference between metrics (`total_box_drv_{t-1} - drv_{t-1}`) as a measure of discrepancy
-    - Wire length (`wireLength_{t-1}`)
+        - Wire length (`wireLength_{t-1}`)
 - Aggregated box-level metrics from the *end* of iteration `t-1`:
-    - Average `box_drv` per box
     - Maximum `box_drv` on any single box (`max_box_drv_{t-1}`)
     - Count and Percentage of boxes with non-zero DRV (`num_violating_{t-1}`)
+    - Average `box_drv` per box (`average_box_drv_{t-1}`)
 - Historical DRV trajectory: Iteration-level DRV counts from the last `k` iterations (e.g., `[drv_{t-1}, drv_{t-2}, ..., drv_{t-k}]`). Use padding (e.g., initial DRV or a special value) for iterations `t < k`. Let's start with `k=3`. *Make sure this history is available for the reward calculation.*
 - **Note:** We will *not* include the specific `designID` to encourage learning universal weights.
+- **Note:** `total_box_drv` related features have been removed from the state.
 
 ### Action Space
 - Four continuous values representing the weights *to be used* for iteration `t`:
@@ -85,9 +84,10 @@ The state representation at the beginning of iteration `t` should include:
   - `convergence_bonus = bonus_value if drv_t == 0 else 0` (tune `bonus_value`)
 
 **Combination & Normalization:**
-- **Normalize Components:** Normalize `primary_reward`, `box_reward` (if used), `num_violating_reward`, and `stuck_penalty` (e.g., divide by std dev) before combining.
-- **Final reward**: `reward = norm(primary) + β₁*norm(box) + β₄*norm(num_violating) + β₂*norm(stuck) + β₃*convergence_bonus`
+- **Normalize Components:** Normalize `primary_reward`, `num_violating_reward`, and `stuck_penalty` (e.g., divide by std dev) before combining.
+- **Final reward**: `reward = norm(primary) + β₄*norm(num_violating) + β₂*norm(stuck) + β₃*convergence_bonus`
   - Tune β weights, starting with a significant weight for `norm(num_violating)` (β₄).
+  - Note: `box_reward` (β₁) component has been removed.
 
 **Experimental Alternatives:**
 - **Simpler Reward**: Evaluate `norm(primary) + β₃*convergence_bonus` or `norm(num_violating) + β₃*convergence_bonus`.
@@ -107,17 +107,16 @@ This pipeline transforms the raw, box-level CSV data into the iteration-level tr
     *   For each group (representing one iteration of one run):
         *   Extract iteration-level features (like `drv`, `wireLength`, weights, `pin_count`, `net_count` - taking the value from the first row is usually sufficient as they are constant within the iteration).
         *   Calculate aggregated `box_drv` features (using the strategy defined in step 3 for the affected run):
-            *   `total_box_drv` = `sum(box_drv)`
-            *   `average_box_drv` = `mean(box_drv)`
             *   `max_box_drv` = `max(box_drv)`
+            *   `average_box_drv` = `mean(box_drv)`
             *   `num_violating` = count of boxes with `box_drv > 0`
             *   `non_zero_drv_box_percentage` = percentage of boxes with `box_drv > 0`
-            *   `drv_difference` = `total_box_drv - drv` (to track the discrepancy directly)
         *   **Note:** We are explicitly *not* aggregating `L_N_drv` or `R_N_box` into the iteration state.
     *   Store these iteration-level and aggregated features in a new DataFrame, indexed by `uniqueID` and `iteration`.
-5.  **Calculate Reward Components:** Based on the aggregated iteration data, calculate all required reward components (`primary_reward`, `box_reward`, `num_violating_reward`, `stuck_penalty`, `convergence_bonus`). This requires shifting data to get values from `t`, `t-1`, `t-2`, etc.
+5.  **Calculate Reward Components:** Based on the aggregated iteration data, calculate all required reward components (`primary_reward`, `num_violating_reward`, `stuck_penalty`, `convergence_bonus`). This requires shifting data to get values from `t`, `t-1`, `t-2`, etc. (`box_reward` removed).
 6.  **Normalize Rewards (Optional but Recommended):** Calculate statistics (e.g., std dev) for the main reward components across the dataset and store them. Normalize these components.
-7.  **Construct Transitions:** Sort the iteration-level DataFrame by `uniqueID` and `iteration`.
+7.  **Calculate and Save Action Statistics:** Determine the minimum and maximum values for each action column (`drc_weight`, etc.) across the entire dataset and save these statistics (e.g., to `action_min_max.npz`).
+8.  **Construct Transitions:** Sort the iteration-level DataFrame by `uniqueID` and `iteration`.
     *   Iterate through the sorted data, grouping by `uniqueID`.
     *   For each `uniqueID`, create the sequence of transitions `(s_t, a_t, r_t, s_{t+1}, terminal_t)`:
         *   `s_t`: State built from iteration `t-1` data (including historical DRVs up to `t-1`). If historical DRVs (`drv_{t-k}`) are missing (due to being near the start of a trajectory, iterations `< k`), **pad these missing values with -1**.
@@ -126,53 +125,35 @@ This pipeline transforms the raw, box-level CSV data into the iteration-level tr
         *   `s_{t+1}`: State built from iteration `t` data (again, padding history if needed).
         *   `terminal_t`: `True` if `drv_t == 0` (i.e., the state *reached* after the transition is terminal).
     *   **Note:** All transitions, including the first and last ones in each trajectory, are kept.
-8.  **Normalize States:** Apply normalization to the numerical features within the `states` portion of the generated transitions.
-    - Consider using `RobustScaler` or design-specific normalization strategies due to the wide variance in DRV scales across designs.
-9.  **Create MDPDataset:** Convert the lists of states, actions, rewards, next_states, and terminals into d3rlpy's `MDPDataset` format.
+9.  **Normalize States:** Apply normalization (e.g., `RobustScaler`) to the numerical features within the `states` portion of the generated transitions. Save the scaler.
+10. **Create MDPDataset:** Convert the lists of normalized states, *original* actions, rewards, and terminals into d3rlpy's `MDPDataset` format and save it.
 
 ### Offline RL Training with CQL
-1. Use d3rlpy's CQL implementation:
-```python
-import d3rlpy
-from d3rlpy.algos import CQL
-from d3rlpy.datasets import MDPDataset
-
-# Create dataset from preprocessed data
-dataset = MDPDataset(states, actions, rewards, terminals)
-
-# Create and train CQL model
-cql = CQL(use_gpu=True, alpha=1.0)  # Alpha controls the conservativeness
-cql.fit(dataset, n_epochs=100, verbose=True)
-
-# Save the trained model
-cql.save_model('routing_weight_optimizer.pt')
-```
-
-2. Hyperparameter tuning:
-   - Alpha: Controls conservativeness of the policy
-   - Actor/critic architecture and learning rates
-   - Regularization parameters
-   - Reward component weights (β₁, β₂, β₃, β₄) and penalty/bonus values.
-   - Reward normalization strategy (if used).
-   - State normalization strategy
-   - History length `k` for state and `m` / tolerance `ε_stuck` for stuck penalty.
-   - **Note:** Initial runs on the fully processed dataset (including padded states and imputed first rewards) show instability with `conservative_weight=1.0` and default learning rates (actor=3e-5, critic=3e-4). Tuning `conservative_weight` (e.g., 0.5-10.0) and **reducing learning rates** (e.g., actor/critic in range 1e-5 to 3e-5) should be prioritized.
+1.  **Load Dataset and Action Stats:** Load the generated `MDPDataset` and the saved action min/max statistics.
+2.  **Configure CQL:**
+    *   Instantiate `d3rlpy.preprocessing.MinMaxActionScaler` using the loaded min/max action statistics.
+    *   Configure `d3rlpy.algos.CQLConfig`, passing the `MinMaxActionScaler` instance to the `action_scaler` argument. Optionally configure a `reward_scaler`.
+    *   Create the `CQL` algorithm instance (`cql = config.create(...)`).
+3.  **Train Model:** Use `cql.fit(dataset, ...)` to train the model.
+4.  **Save Model Parameters:** Save the trained model parameters using `cql.save_model(...)` (e.g., `model_final.d3` or `model.pt`).
+5.  **Export Inference Policy:** Export the policy separately for deployment using `cql.save_policy(...)` in both TorchScript (`policy.pt`) and ONNX (`policy.onnx`) formats.
 
 ### Inference System
-1. Load the trained CQL model:
-```python
-loaded_cql = CQL()
-loaded_cql.build_with_dataset(dataset)
-loaded_cql.load_model('routing_weight_optimizer.pt')
-```
-
-2. For each new routing iteration:
-   - Construct the current state representation, including required history.
-   - Use the model to predict optimal weights:
-   ```python
-   weights = loaded_cql.predict([current_state])[0]
-   ```
-   - Apply these weights for the entire iteration
+1.  **Option A (Using d3rlpy in Python Script):**
+    *   Load the saved model parameters (`.pt` or `.d3`) using `config.create(...)`, `cql_algo.create_impl(...)`, and `cql_algo.load_model(...)`.
+    *   Load the state scaler (`.pkl`).
+    *   In the inference script (`predict_weights.py`):
+        *   Receive raw state features.
+        *   Normalize the state using the loaded state scaler.
+        *   Call `model.predict(normalized_state)`. Because the model was trained with `action_scaler`, this will automatically return *denormalized* actions in their original approximate scale.
+        *   Apply final domain constraints (e.g., `max(1.0, weight)`) to the denormalized weights.
+        *   Output the constrained weights.
+2.  **Option B (Using Exported Policy in C++):**
+    *   Load the exported TorchScript (`policy.pt`) or ONNX (`policy.onnx`) policy using LibTorch or ONNX Runtime in C++.
+    *   Load the state scaler parameters (center/scale from `.pkl`) and implement state normalization logic in C++.
+    *   Normalize the state in C++.
+    *   Feed the normalized state to the loaded policy to get actions. **Note:** Policies exported via `save_policy` *should* incorporate the denormalization internally if trained with an `action_scaler`.
+    *   Apply final domain constraints in C++.
 
 ### Visualization and Analysis
 1. Use libraries like matplotlib and seaborn for:
@@ -183,11 +164,14 @@ loaded_cql.load_model('routing_weight_optimizer.pt')
    - Performance comparison across different designs
 
 ## Expected Outcome
-The CQL-trained agent should learn robust weight optimization strategies from offline data that significantly reduce the number of iterations required for complete routing. By incorporating denser reward signals like the change in the number of violating boxes, the agent may overcome some limitations of reward sparsity and find effective weight combinations, despite other data limitations.
+
+- **CQL:** The CQL-trained agent should learn robust weight optimization strategies from offline data that significantly reduce the number of iterations required for complete routing. By incorporating denser reward signals like the change in the number of violating boxes, the agent may overcome some limitations of reward sparsity and find effective weight combinations, despite other data limitations.
+- **Decision Transformer (DT):** The DT agent will model the routing process as a sequence problem. If successful, it might learn different types of strategies compared to CQL, potentially focusing on achieving a target return (e.g., zero DRV) given the history. Its performance will depend heavily on the `context_size`, the determined `max_timestep`, and how target returns-to-go are handled during training and inference.
 
 ## Additional Considerations
-- d3rlpy offers other offline RL algorithms (BCQ, BEAR, TD3+BC) that could be compared against CQL
-- Consider ensemble methods by training multiple models on different subsets of the data
+
+- **Algorithm Comparison:** Explicitly compare CQL and DT performance using consistent evaluation metrics (offline and, if possible, online simulation). d3rlpy offers other offline RL algorithms (BCQ, BEAR, TD3+BC) that could be compared against CQL.
+- **Ensemble Methods:** Consider ensemble methods by training multiple models (of the same or different types) on different subsets of the data or with different initializations.
 - Implement uncertainty estimation to gauge confidence in the model's weight predictions
 - Experiment with different normalization strategies (`StandardScaler`, `RobustScaler`, design-specific) for both states and potentially rewards.
 - Given the `decay_weight` bias, the learned policy will likely keep this value high. Evaluate if this constraint is acceptable.
