@@ -28,7 +28,7 @@ from datetime import datetime # Add datetime import
 # DEFAULT_DATASET_PATH = "data/routing_dataset.h5" # Removed
 DEFAULT_DATASET_DIR = "data/cql_dataset" # New default directory for CQL data
 DEFAULT_DATASET_FILENAME = "routing_dataset.h5" # Fixed filename within dir
-DEFAULT_STATS_FILENAME = "action_reward_stats.npz" # Fixed filename within dir
+DEFAULT_STATS_FILENAME = "action_timestep_stats.npz" # New filename: Only action/timestep stats
 DEFAULT_LOGDIR_BASE = "d3rlpy_logs"
 DEFAULT_EXPERIMENT_NAME = "CQL_Long_Train_RewardScaled" # Updated name for experiment
 DEFAULT_EPOCHS = 50 # Increased epochs for longer run
@@ -43,6 +43,7 @@ DEFAULT_BATCH_SIZE = 256 # Common batch size
 DEFAULT_GRAD_CLIP = 10.0 # Default gradient clipping norm
 DEFAULT_INITIAL_TEMP = 1.0
 DEFAULT_TEMP_LR = 1e-4 # Default temperature learning rate from CQLConfig
+DEFAULT_TAU = 0.005 # Added default Tau (common value in SAC/CQL)
 
 # --- Argument Parsing ---
 def parse_args():
@@ -79,8 +80,17 @@ def parse_args():
                          help=f"Initial temperature for SAC entropy (default: {DEFAULT_INITIAL_TEMP})")
     parser.add_argument("--temp_learning_rate", type=float, default=DEFAULT_TEMP_LR,
                          help=f"Learning rate for temperature (default: {DEFAULT_TEMP_LR}, 0 to fix temperature)")
+    parser.add_argument("--tau", type=float, default=DEFAULT_TAU,
+                         help=f"Target network update rate (polyak averaging) (default: {DEFAULT_TAU})")
     # Add more arguments for CQL hyperparameters later (e.g., target update interval, n_critics)
     args = parser.parse_args()
+
+    # --- CRITICAL --- 
+    # The --conservative_weight is extremely important for CQL.
+    # Optimal performance requires tuning this value for your specific dataset.
+    # Common values to sweep: [1.0, 5.0, 10.0, 20.0]
+    # Learning rates (--actor_lr, --critic_lr) also require careful tuning.
+    # ----------------
 
     # Determine log directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -98,7 +108,7 @@ def main():
 
     # --- Construct paths based on dataset_dir ---
     dataset_file_path = os.path.join(args.dataset_dir, DEFAULT_DATASET_FILENAME)
-    stats_file_path = os.path.join(args.dataset_dir, DEFAULT_STATS_FILENAME)
+    stats_file_path = os.path.join(args.dataset_dir, DEFAULT_STATS_FILENAME) # Use new stats filename
 
     print("--- Starting CQL Training --- ")
     # print(f"Dataset: {args.dataset}") # Old
@@ -112,6 +122,7 @@ def main():
     print(f"Hyperparameters: ActorLR={args.actor_lr}, CriticLR={args.critic_lr}, ConservWeight={args.conservative_weight}, Batch={args.batch_size}")
     print(f"Gradient Clipping Norm: {args.grad_clip}")
     print(f"Initial Temperature: {args.initial_temperature}, Temp LR: {args.temp_learning_rate}")
+    print(f"Target Update Rate (Tau): {args.tau}")
     # print(f"Action Stats Path: {args.action_stats_path}") # Old
 
     # --- Set Random Seed ---
@@ -153,8 +164,8 @@ def main():
         # Update keys for loading
         min_vals = stats['action_minimum']
         max_vals = stats['action_maximum']
-        # reward_min = stats['reward_minimum'] # Load but not needed for scaler config
-        # reward_max = stats['reward_maximum']
+        # reward_min = stats['reward_minimum'] # Load but not needed for scaler config # Removed
+        # reward_max = stats['reward_maximum'] # Removed
         # max_timestep = int(stats['max_timestep']) # Not needed for CQL config
         print(f"Loaded action stats: Min={min_vals}, Max={max_vals}")
 
@@ -195,11 +206,15 @@ def main():
         conservative_weight=args.conservative_weight,
         initial_temperature=args.initial_temperature,
         batch_size=args.batch_size,
+        tau=args.tau,
         observation_scaler=observation_scaler, 
         action_scaler=action_scaler,      
         reward_scaler=None, # REMOVED StandardRewardScaler - rewards are now pre-scaled in dataset
         compile_graph = False # Keep disabled
-        # Add other configured hyperparameters here
+        # --- d3rlpy Defaults Used (Best Practices) ---
+        # n_critics=2 (Clipped Double Q-learning is used by default)
+        # Target network updates (soft or hard) are handled internally by d3rlpy defaults.
+        # -------------------------------------------
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cql = cql_config.create(device= device.type)
